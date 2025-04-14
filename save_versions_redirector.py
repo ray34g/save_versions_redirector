@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Save Versions Redirector",
     "blender": (2, 80, 0),
-    "version": (1, 6),
+    "version": (1, 0, 0),
     "author": "ray34g",
     "category": "System",
-    "description": "Redirects save versions to a centralized folder and preserves time-based checkpoints.",
+    "description": "Redirects save versions to a centralized or custom folder and preserves time-based checkpoints.",
 }
 
 import bpy
@@ -22,6 +22,13 @@ import re
 class SaveVersionsRedirectorPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
 
+    save_directory: bpy.props.StringProperty(
+        name="Backup Save Directory",
+        description="Directory to save versioned backup files. Leave blank to use Blender's temporary path.",
+        subtype='DIR_PATH',
+        default=""
+    )
+
     v2_minutes: bpy.props.IntProperty(name="v2 Threshold (minutes)", default=30, min=0)
     v3_minutes: bpy.props.IntProperty(name="v3 Threshold (minutes)", default=60, min=0)
     v4_minutes: bpy.props.IntProperty(name="v4 Threshold (minutes)", default=480, min=0)
@@ -29,6 +36,10 @@ class SaveVersionsRedirectorPreferences(bpy.types.AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        layout.label(text="Save Location:")
+        layout.prop(self, "save_directory")
+
+        layout.separator()
         layout.label(text="Time-based versioning thresholds:")
         layout.prop(self, "v2_minutes")
         layout.prop(self, "v3_minutes")
@@ -46,10 +57,14 @@ def get_unique_prefix(filepath):
     return f"{name}_{hashed}"
 
 def get_versions_dir():
-    return os.path.join(
-        bpy.context.preferences.filepaths.temporary_directory or bpy.app.tempdir,
-        "versions"
-    )
+    prefs = bpy.context.preferences.addons[__name__].preferences
+    if prefs.save_directory.strip():
+        return os.path.abspath(bpy.path.abspath(prefs.save_directory))
+    else:
+        return os.path.join(
+            bpy.context.preferences.filepaths.temporary_directory or bpy.app.tempdir,
+            "versions"
+        )
 
 def get_version_path(versions_dir, prefix, v):
     return os.path.join(versions_dir, f"{prefix}_v{v}.blend")
@@ -101,7 +116,7 @@ def move_backup_file(dummy):
         if m:
             version_files.append((int(m.group(1)), f))
 
-    # max_versions を超える古いバージョンを削除
+    # max_versions を超えるバージョンを削除
     for version_num, fname in sorted(version_files, reverse=True):
         if version_num > max_versions:
             try:
@@ -110,16 +125,15 @@ def move_backup_file(dummy):
             except Exception as e:
                 print(f"[Save Versions Redirector] Failed to remove v{version_num}: {e}")
 
-    # v1〜max_versions ループ処理
+    # v1〜max_versions を処理
     for v in range(1, max_versions + 1):
         threshold = thresholds.get(v, 0)
         version_path = get_version_path(versions_dir, prefix, v)
 
         if not os.path.exists(version_path):
-            if threshold == 0 or now >= threshold:
-                shutil.copy2(source_backup, version_path)
-                print(f"[Save Versions Redirector] Created v{v} → {version_path}")
-                break
+            shutil.copy2(source_backup, version_path)
+            print(f"[Save Versions Redirector] Created v{v} → {version_path}")
+            break
         else:
             last_modified = os.path.getmtime(version_path)
             if threshold == 0 or now - last_modified >= threshold:
