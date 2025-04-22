@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Save Versions Redirector",
     "blender": (2, 80, 0),
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "author": "ray34g",
     "category": "System",
-    "description": "Redirects save versions to a centralized or custom folder and preserves time-based checkpoints.",
+    "description": "Keeps a rolling set of backups: 'latest', 'prev1', 'prev2' … . Each slot has its own minimum‑age threshold before being overwritten."
 }
 
 import bpy
@@ -15,152 +15,158 @@ import hashlib
 import time
 import re
 
-# ------------------------
-# アドオン設定クラス
-# ------------------------
+# -----------------------------------------------------------------------------
+# Preferences
+# -----------------------------------------------------------------------------
 
 class SaveVersionsRedirectorPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
 
     save_directory: bpy.props.StringProperty(
         name="Backup Save Directory",
-        description="Directory to save versioned backup files. Leave blank to use Blender's temporary path.",
+        description="Leave blank to use Blender's temporary path.",
         subtype='DIR_PATH',
         default=""
     )
 
-    v2_minutes: bpy.props.IntProperty(name="v2 Threshold (minutes)", default=30, min=0)
-    v3_minutes: bpy.props.IntProperty(name="v3 Threshold (minutes)", default=60, min=0)
-    v4_minutes: bpy.props.IntProperty(name="v4 Threshold (minutes)", default=480, min=0)
-    v5_minutes: bpy.props.IntProperty(name="v5 Threshold (minutes)", default=1440, min=0)
+    # Thresholds (minutes) – rename to prevN_minutes for clarity
+    prev1_minutes: bpy.props.IntProperty(name="prev1 Threshold (min)", default=30, min=0)
+    prev2_minutes: bpy.props.IntProperty(name="prev2 Threshold (min)", default=60, min=0)
+    prev3_minutes: bpy.props.IntProperty(name="prev3 Threshold (min)", default=480, min=0)
+    prev4_minutes: bpy.props.IntProperty(name="prev4 Threshold (min)", default=1440, min=0)
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Save Location:")
         layout.prop(self, "save_directory")
-
         layout.separator()
-        layout.label(text="Time-based versioning thresholds:")
-        layout.prop(self, "v2_minutes")
-        layout.prop(self, "v3_minutes")
-        layout.prop(self, "v4_minutes")
-        layout.prop(self, "v5_minutes")
+        layout.label(text="Overwrite thresholds (minutes):")
+        for a in (
+            "prev1_minutes",
+            "prev2_minutes",
+            "prev3_minutes",
+            "prev4_minutes",
+        ):
+            layout.prop(self, a)
 
-# ------------------------
-# ユーティリティ関数
-# ------------------------
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 
-def get_unique_prefix(filepath):
-    full_path = os.path.abspath(filepath)
-    hashed = hashlib.sha1(full_path.encode("utf-8")).hexdigest()[:8]
-    name = os.path.splitext(os.path.basename(filepath))[0]
-    return f"{name}_{hashed}"
+def _hash_name(fp: str) -> str:
+    base = os.path.splitext(os.path.basename(fp))[0]
+    return f"{base}_{hashlib.sha1(os.path.abspath(fp).encode()).hexdigest()[:8]}"
 
-def get_versions_dir():
-    prefs = bpy.context.preferences.addons[__name__].preferences
-    if prefs.save_directory.strip():
-        return os.path.abspath(bpy.path.abspath(prefs.save_directory))
-    else:
-        return os.path.join(
-            bpy.context.preferences.filepaths.temporary_directory or bpy.app.tempdir,
-            "versions"
-        )
 
-def get_version_path(versions_dir, prefix, v):
-    return os.path.join(versions_dir, f"{prefix}_v{v}.blend")
+def _versions_dir() -> str:
+    p = bpy.context.preferences.addons[__name__].preferences
+    if p.save_directory.strip():
+        return os.path.abspath(bpy.path.abspath(p.save_directory))
+    tmp = bpy.context.preferences.filepaths.temporary_directory or bpy.app.tempdir
+    return os.path.join(tmp, "versions")
 
-def get_threshold_seconds_map(max_versions: int):
-    prefs = bpy.context.preferences.addons[__name__].preferences
-    thresholds = {
-        1: 0,  # v1 は常時保存
-        2: prefs.v2_minutes * 60,
-        3: prefs.v3_minutes * 60,
-        4: prefs.v4_minutes * 60,
-        5: prefs.v5_minutes * 60,
+
+def _ver(root: str, prefix: str, v: int) -> str:
+    label = "latest" if v == 1 else f"prev{v-1}"
+    return os.path.join(root, f"{prefix}_{label}.blend")
+
+
+def _thresholds(max_v: int):
+    p = bpy.context.preferences.addons[__name__].preferences
+    t = {
+        1: 0,
+        2: p.prev1_minutes * 60,
+        3: p.prev2_minutes * 60,
+        4: p.prev3_minutes * 60,
+        5: p.prev4_minutes * 60,
     }
+    if p.prev4_minutes > 0:
+        for v in range(6, max_v + 1):
+            t[v] = (p.prev4_minutes + p.prev4_minutes * (v - 5)) * 60
+    return t
 
-    v5_minutes = prefs.v5_minutes
-    if v5_minutes > 0:
-        for v in range(6, max_versions + 1):
-            minutes = v5_minutes + v5_minutes * (v - 5)
-            thresholds[v] = minutes * 60
-    return thresholds
 
-# ------------------------
-# 保存処理
-# ------------------------
+def _rotate(prefix: str, root: str, max_v: int, start: int):
+    overflow = _ver(root, prefix, max_v)
+    if os.path.exists(overflow):
+        os.remove(overflow)
+    for v in range(max_v - 1, start - 1, -1):
+        src = _ver(root, prefix, v)
+        dst = _ver(root, prefix, v + 1)
+        if os.path.exists(src):
+            shutil.move(src, dst)
+
+
+def _find_slot(prefix: str, root: str, max_v: int, thresholds: dict, now: float):
+    for v in range(2, max_v + 1):
+        path = _ver(root, prefix, v)
+        thresh = thresholds.get(v, 0)
+        if not os.path.exists(path):
+            return v, False
+        if thresh == 0 or now - os.path.getmtime(path) >= thresh:
+            return v, True
+    return None, False
+
+# -----------------------------------------------------------------------------
+# Handler
+# -----------------------------------------------------------------------------
 
 @persistent
-def move_backup_file(dummy):
-    filepath = bpy.data.filepath
-    if not filepath:
+def save_versions_post(_):
+    fp = bpy.data.filepath
+    if not fp:
+        return
+    src_bak = fp + "1"
+    if not os.path.exists(src_bak):
         return
 
-    source_backup = filepath + "1"
-    if not os.path.exists(source_backup):
-        return
-
-    max_versions = bpy.context.preferences.filepaths.save_version
-    prefix = get_unique_prefix(filepath)
-    versions_dir = get_versions_dir()
-    os.makedirs(versions_dir, exist_ok=True)
+    max_v = max(bpy.context.preferences.filepaths.save_version, 1)
+    root = _versions_dir()
+    os.makedirs(root, exist_ok=True)
+    prefix = _hash_name(fp)
 
     now = time.time()
-    thresholds = get_threshold_seconds_map(max_versions)
+    thresholds = _thresholds(max_v)
 
-    # 既存バージョン一覧取得
-    version_files = []
-    pattern = re.compile(rf"{re.escape(prefix)}_v(\d+)\.blend")
-    for f in os.listdir(versions_dir):
-        m = pattern.match(f)
-        if m:
-            version_files.append((int(m.group(1)), f))
+    slot, need_rot = _find_slot(prefix, root, max_v, thresholds, now)
+    if slot is not None:
+        if need_rot:
+            _rotate(prefix, root, max_v, slot)
+        shutil.copy2(src_bak, _ver(root, prefix, slot))
 
-    # max_versions を超えるバージョンを削除
-    for version_num, fname in sorted(version_files, reverse=True):
-        if version_num > max_versions:
+    shutil.copy2(src_bak, _ver(root, prefix, 1))
+
+    pat = re.compile(rf"{re.escape(prefix)}_(latest|prev(\d+))\.blend")
+    for f in os.listdir(root):
+        m = pat.match(f)
+        if not m:
+            continue
+        idx = 1 if m.group(1) == "latest" else int(m.group(2)) + 1
+        if idx > max_v:
             try:
-                os.remove(os.path.join(versions_dir, fname))
-                print(f"[Save Versions Redirector] Removed v{version_num} ({fname})")
-            except Exception as e:
-                print(f"[Save Versions Redirector] Failed to remove v{version_num}: {e}")
-
-    # v1〜max_versions を処理
-    for v in range(1, max_versions + 1):
-        threshold = thresholds.get(v, 0)
-        version_path = get_version_path(versions_dir, prefix, v)
-
-        if not os.path.exists(version_path):
-            shutil.copy2(source_backup, version_path)
-            print(f"[Save Versions Redirector] Created v{v} → {version_path}")
-            break
-        else:
-            last_modified = os.path.getmtime(version_path)
-            if threshold == 0 or now - last_modified >= threshold:
-                shutil.copy2(source_backup, version_path)
-                print(f"[Save Versions Redirector] Updated v{v} → {version_path}")
-                break
-            else:
-                print(f"[Save Versions Redirector] Skipped v{v} (not enough time elapsed)")
+                os.remove(os.path.join(root, f))
+            except Exception:
+                pass
 
     try:
-        os.remove(source_backup)
-    except Exception as e:
-        print(f"[Save Versions Redirector] Failed to remove .blend1: {e}")
+        os.remove(src_bak)
+    except Exception:
+        pass
 
-# ------------------------
-# 登録・解除
-# ------------------------
+# -----------------------------------------------------------------------------
+# Registration
+# -----------------------------------------------------------------------------
 
 def register():
     bpy.utils.register_class(SaveVersionsRedirectorPreferences)
-    if move_backup_file not in bpy.app.handlers.save_post:
-        bpy.app.handlers.save_post.append(move_backup_file)
+    if save_versions_post not in bpy.app.handlers.save_post:
+        bpy.app.handlers.save_post.append(save_versions_post)
+
 
 def unregister():
-    if move_backup_file in bpy.app.handlers.save_post:
-        bpy.app.handlers.save_post.remove(move_backup_file)
+    if save_versions_post in bpy.app.handlers.save_post:
+        bpy.app.handlers.save_post.remove(save_versions_post)
     bpy.utils.unregister_class(SaveVersionsRedirectorPreferences)
+
 
 if __name__ == "__main__":
     register()
