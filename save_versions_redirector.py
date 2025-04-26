@@ -111,9 +111,17 @@ def _copy_async(src, dst):
     def task():
         try:
             shutil.copy2(src, dst)
+            _notify(f"Copied: {os.path.basename(dst)}")
         except Exception as e:
-            print(f"[SaveVersionsRedirector] Copy failed: {e}")
+            _notify(f"Copy failed: {e}")
     threading.Thread(target=task, daemon=True).start()
+
+def _notify(message: str):
+    def draw(self, context):
+        self.layout.label(text=message)
+
+    bpy.context.window_manager.popup_menu(draw, title="Save Versions", icon='INFO')
+
 
 # -----------------------------------------------------------------------------
 # Handler
