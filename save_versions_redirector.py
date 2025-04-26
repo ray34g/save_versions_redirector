@@ -14,6 +14,7 @@ import shutil
 import hashlib
 import time
 import re
+import threading
 
 # -----------------------------------------------------------------------------
 # Preferences
@@ -106,6 +107,14 @@ def _find_slot(prefix: str, root: str, max_v: int, thresholds: dict, now: float)
             return v, True
     return None, False
 
+def _copy_async(src, dst):
+    def task():
+        try:
+            shutil.copy2(src, dst)
+        except Exception as e:
+            print(f"[SaveVersionsRedirector] Copy failed: {e}")
+    threading.Thread(target=task, daemon=True).start()
+
 # -----------------------------------------------------------------------------
 # Handler
 # -----------------------------------------------------------------------------
@@ -131,9 +140,10 @@ def save_versions_post(_):
     if slot is not None:
         if need_rot:
             _rotate(prefix, root, max_v, slot)
-        shutil.copy2(src_bak, _ver(root, prefix, slot))
+        _copy_async(src_bak, _ver(root, prefix, slot))
 
-    shutil.copy2(src_bak, _ver(root, prefix, 1))
+    _copy_async(src_bak, _ver(root, prefix, 1))
+
 
     pat = re.compile(rf"{re.escape(prefix)}_(latest|prev(\d+))\.blend")
     for f in os.listdir(root):
