@@ -90,9 +90,9 @@ When you save repeatedly within 30 minutes, only **latest** changes. Once 30 m
 
 | Version | Highlights |
 |---------|------------|
-| 1.7 | Switched to `latest/prevN` naming & renamed preferences to `prevN_minutes` |
-| 1.6 | Added custom thresholds, improved clean‑up |
-| 1.0 | Initial release |
+| 1.2.0 | Switched to `latest/prevN` naming & renamed preferences to `prevN_minutes` |
+| 1.1.0 | Added custom thresholds, improved clean‑up |
+| 1.0.0 | Initial release |
 
 ---
 

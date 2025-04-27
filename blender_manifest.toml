@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "ray34g.save_versions_redirector"
-version = "1.2.0"
+version = "1.0.0"
 name = "Save Versions Redirector"
 tagline = "Manage backup save versions automatically"
 maintainer = "ray34g <Go.Ray@ray34g.com>"
