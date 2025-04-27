@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Save Versions Redirector",
     "blender": (2, 80, 0),
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "author": "ray34g",
     "category": "System",
     "description": "Keeps a rolling set of backups: 'latest', 'prev1', 'prev2' … . Each slot has its own minimum‑age threshold before being overwritten."
