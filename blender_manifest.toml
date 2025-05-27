@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "ray34g_save_versions_redirector"
-version = "1.2.0"
+version = "1.3.0"
 name = "Save Versions Redirector"
 tagline = "Manage backup save versions automatically"
 maintainer = "ray34g <Go.Ray@ray34g.com>"
@@ -18,6 +18,6 @@ license = [
 
 blender_version_min = "4.2.0"
 
-# website = "https://github.com/ray34g/save_versions_redirector"
+website = "https://github.com/ray34g/blender-extensions"
 platforms = ["windows-x64", "macos-x64", "linux-x64"]
 # tags = ["System", "Files", "Automation"]

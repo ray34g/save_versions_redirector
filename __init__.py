@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Save Versions Redirector",
-    "blender": (2, 80, 0),
-    "version": (1, 2, 0),
+    "blender": (4, 2, 0),
+    "version": (1, 3, 0),
     "author": "ray34g",
     "category": "System",
     "description": "Keeps a rolling set of backups: 'latest', 'prev1', 'prev2' … . Each slot has its own minimum‑age threshold before being overwritten."
@@ -30,7 +30,7 @@ class SaveVersionsRedirectorPreferences(bpy.types.AddonPreferences):
         default=""
     )
 
-    # Thresholds (minutes) – rename to prevN_minutes for clarity
+    # Overwrite‑age thresholds (minutes) for each slot
     prev1_minutes: bpy.props.IntProperty(name="prev1 Threshold (min)", default=30, min=0)
     prev2_minutes: bpy.props.IntProperty(name="prev2 Threshold (min)", default=60, min=0)
     prev3_minutes: bpy.props.IntProperty(name="prev3 Threshold (min)", default=480, min=0)
@@ -59,9 +59,9 @@ def _hash_name(fp: str) -> str:
 
 
 def _versions_dir() -> str:
-    p = bpy.context.preferences.addons[__name__].preferences
-    if p.save_directory.strip():
-        return os.path.abspath(bpy.path.abspath(p.save_directory))
+    prefs = bpy.context.preferences.addons[__name__].preferences
+    if prefs.save_directory.strip():
+        return os.path.abspath(bpy.path.abspath(prefs.save_directory))
     tmp = bpy.context.preferences.filepaths.temporary_directory or bpy.app.tempdir
     return os.path.join(tmp, "versions")
 
@@ -72,21 +72,19 @@ def _ver(root: str, prefix: str, v: int) -> str:
 
 
 def _thresholds(max_v: int):
+    """Return a dict {slot_index: seconds_before_overwrite}."""
     p = bpy.context.preferences.addons[__name__].preferences
-    t = {
-        1: 0,
-        2: p.prev1_minutes * 60,
-        3: p.prev2_minutes * 60,
-        4: p.prev3_minutes * 60,
-        5: p.prev4_minutes * 60,
-    }
+    base = [0, p.prev1_minutes, p.prev2_minutes, p.prev3_minutes, p.prev4_minutes]
+    thr = {i + 1: m * 60 for i, m in enumerate(base) if i + 1 <= max_v}
+    # Extend linearly using prev4 spacing
     if p.prev4_minutes > 0:
         for v in range(6, max_v + 1):
-            t[v] = (p.prev4_minutes + p.prev4_minutes * (v - 5)) * 60
-    return t
+            thr[v] = (p.prev4_minutes + p.prev4_minutes * (v - 5)) * 60
+    return thr
 
 
 def _rotate(prefix: str, root: str, max_v: int, start: int):
+    """Shift existing slots backward to make room for a new file in *start*."""
     overflow = _ver(root, prefix, max_v)
     if os.path.exists(overflow):
         os.remove(overflow)
@@ -98,6 +96,7 @@ def _rotate(prefix: str, root: str, max_v: int, start: int):
 
 
 def _find_slot(prefix: str, root: str, max_v: int, thresholds: dict, now: float):
+    """Return (slot_index, need_rotate) or (None, False) if no slot available."""
     for v in range(2, max_v + 1):
         path = _ver(root, prefix, v)
         thresh = thresholds.get(v, 0)
@@ -107,21 +106,35 @@ def _find_slot(prefix: str, root: str, max_v: int, thresholds: dict, now: float)
             return v, True
     return None, False
 
-def _copy_async(src, dst):
+
+def _notify(message: str):
+    def draw(self, _context):
+        self.layout.label(text=message)
+    bpy.context.window_manager.popup_menu(draw, title="Save Versions", icon='INFO')
+
+
+def _copy_async(src: str, dst: str, *, notify: bool = True):
+    """Copy *src* to *dst* in a daemon thread, then (optionally) show pop‑up."""
     def task():
         try:
             shutil.copy2(src, dst)
-            _notify(f"Copied: {os.path.basename(dst)}")
+            if notify:
+                bpy.app.timers.register(lambda: _notify(f"Copied: {os.path.basename(dst)}"), first_interval=0.0)
         except Exception as e:
-            _notify(f"Copy failed: {e}")
+            bpy.app.timers.register(lambda: _notify(f"Copy failed: {e}"), first_interval=0.0)
     threading.Thread(target=task, daemon=True).start()
 
-def _notify(message: str):
-    def draw(self, context):
-        self.layout.label(text=message)
 
-    bpy.context.window_manager.popup_menu(draw, title="Save Versions", icon='INFO')
-
+def _safe_remove(path: str, *, retries: int = 5, delay: float = 2.0):
+    """Attempt to remove *path*; retry a few times in case it is still in use."""
+    def attempt(remaining):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            if remaining > 0:
+                bpy.app.timers.register(lambda: attempt(remaining - 1), first_interval=delay)
+    bpy.app.timers.register(lambda: attempt(retries), first_interval=delay)
 
 # -----------------------------------------------------------------------------
 # Handler
@@ -132,6 +145,8 @@ def save_versions_post(_):
     fp = bpy.data.filepath
     if not fp:
         return
+
+    # Backup created by Blender when Save Preferences > File > Save Versions > 1+
     src_bak = fp + "1"
     if not os.path.exists(src_bak):
         return
@@ -144,15 +159,17 @@ def save_versions_post(_):
     now = time.time()
     thresholds = _thresholds(max_v)
 
+    # Determine destination slot and perform rotation if necessary
     slot, need_rot = _find_slot(prefix, root, max_v, thresholds, now)
     if slot is not None:
         if need_rot:
             _rotate(prefix, root, max_v, slot)
         _copy_async(src_bak, _ver(root, prefix, slot))
 
+    # Always refresh the "latest" slot
     _copy_async(src_bak, _ver(root, prefix, 1))
 
-
+    # Purge old files beyond *max_v*
     pat = re.compile(rf"{re.escape(prefix)}_(latest|prev(\d+))\.blend")
     for f in os.listdir(root):
         m = pat.match(f)
@@ -165,10 +182,8 @@ def save_versions_post(_):
             except Exception:
                 pass
 
-    try:
-        os.remove(src_bak)
-    except Exception:
-        pass
+    # Remove Blender‑generated backup after asynchronous copies finish
+    _safe_remove(src_bak)
 
 # -----------------------------------------------------------------------------
 # Registration
